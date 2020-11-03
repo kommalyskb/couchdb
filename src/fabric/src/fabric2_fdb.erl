@@ -18,6 +18,9 @@
     transactional/3,
     transactional/2,
 
+    enable_grv_cache/0,
+    reset_grv_cache/0,
+
     create/2,
     open/2,
     ensure_current/1,
@@ -158,10 +161,35 @@ transactional(#{tx := {erlfdb_transaction, _}} = Db, Fun) ->
     end).
 
 
+enable_grv_cache() ->
+    put(?PDICT_GRV, pending).
+
+
+reset_grv_cache() ->
+    case get(?PDICT_GRV) of
+        undefined ->
+            ok;
+        _ ->
+            put(?PDICT_GRV, pending)
+    end.
+
+
 do_transaction(Fun, LayerPrefix) when is_function(Fun, 1) ->
     Db = get_db_handle(),
     try
         erlfdb:transactional(Db, fun(Tx) ->
+            case get(?PDICT_GRV) of
+                undefined ->
+                    ok;
+                pending ->
+                    put(?PDICT_GRV, {future, erlfdb:get_read_version(Tx)});
+                {future, Future} ->
+                    GRV = erlfdb:wait(Future),
+                    put(?PDICT_GRV, {grv, GRV}),
+                    erlfdb:set_read_version(Tx, GRV);
+                {grv, GRV} ->
+                    erlfdb:set_read_version(Tx, GRV)
+            end,
             case get(erlfdb_trace) of
                 Name when is_binary(Name) ->
                     UId = erlang:unique_integer([positive]),
@@ -1943,6 +1971,7 @@ execute_transaction(Tx, Fun, LayerPrefix) ->
         true ->
             ok;
         false ->
+            reset_grv_cache(),
             erlfdb:set(Tx, get_transaction_id(Tx, LayerPrefix), <<>>),
             put(?PDICT_TX_RES_KEY, Result)
     end,
